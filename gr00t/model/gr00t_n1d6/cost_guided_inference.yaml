@@ -1,0 +1,155 @@
+mode: fkc
+
+time_grid:
+  num_steps: 4
+
+flow_source:
+  mean: 0.0
+  variance: 1.0
+
+score:
+  eps: 1.0e-6
+
+sigma_schedule:
+  kind: zero_ends
+  alpha: 0.25
+
+beta_schedule:
+  kind: constant
+  guidance_strength: 0.0
+
+linear_combo: {}
+
+fkc:
+  num_particles: 8
+  resample_interval: 1
+  resample_t_min: 0.05
+  resample_t_max: 0.95
+  center_log_weight_increment: true
+
+objective:
+  weights:
+    cost: 1.0
+    equality: 10.0
+    inequality: 10.0
+  placeholder_terms:
+    position_smoothness_weight: 1.0
+    rotation_smoothness_weight: 0.1
+    gripper_smoothness_weight: 0.05
+    terminal_position_weight: 1.0
+    target_position: [0.0, 0.0, 0.0]
+    z_min: -0.25
+    z_barrier_weight: 1.0
+    softplus_beta: 10.0
+    gripper_min: -1.0
+    gripper_max: 1.0
+    gripper_bound_weight: 0.25
+
+embodiments:
+  0:
+    name: oxe_google
+    control_kind: eef
+    objective_space: normalized
+    action_layout:
+      position_idx: [0, 1, 2]
+      rotation_idx: [3, 4, 5]
+      gripper_idx: [6]
+    state_layout:
+      position_idx: [0, 1, 2]
+      rotation_idx: [3, 4, 5, 6]
+      gripper_idx: [7]
+    decoder:
+      action:
+        position:
+          kind: identity
+        rotation:
+          kind: identity
+        gripper:
+          kind: identity
+      state:
+        position:
+          kind: identity
+        rotation:
+          kind: identity
+        gripper:
+          kind: identity
+
+  1:
+    name: oxe_widowx
+    control_kind: eef
+    objective_space: normalized
+    action_layout:
+      position_idx: [0, 1, 2]
+      rotation_idx: [3, 4, 5]
+      gripper_idx: [6]
+    state_layout:
+      position_idx: [0, 1, 2]
+      rotation_idx: [3, 4, 5]
+      gripper_idx: [7]
+    decoder:
+      action:
+        position:
+          kind: identity
+        rotation:
+          kind: identity
+        gripper:
+          kind: identity
+      state:
+        position:
+          kind: identity
+        rotation:
+          kind: identity
+        gripper:
+          kind: identity
+
+  2:
+    name: libero_panda
+    control_kind: eef
+    objective_space: decoded_cartesian
+    action_layout:
+      position_idx: [0, 1, 2]
+      rotation_idx: [3, 4, 5]
+      gripper_idx: [6]
+    state_layout:
+      position_idx: [0, 1, 2]
+      rotation_idx: [3, 4, 5]
+      gripper_idx: [6]
+    decoder:
+      action:
+        position:
+          kind: identity
+        rotation:
+          kind: identity
+        gripper:
+          kind: identity
+      state:
+        position:
+          kind: identity
+        rotation:
+          kind: identity
+        gripper:
+          kind: identity
+
+  8:
+    name: unitree_g1
+    control_kind: non_eef
+
+  10:
+    name: new_embodiment
+    control_kind: non_eef
+
+  13:
+    name: robocasa_panda_omron
+    control_kind: non_eef
+
+  16:
+    name: oxe_droid
+    control_kind: non_eef
+
+  20:
+    name: gr1
+    control_kind: non_eef
+
+  24:
+    name: behavior_r1_pro
+    control_kind: non_eef
