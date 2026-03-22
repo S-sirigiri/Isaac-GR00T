@@ -7,6 +7,7 @@ from gr00t.model.modules.embodiment_conditioned_mlp import (
     CategorySpecificMLP,
     MultiEmbodimentActionEncoder,
 )
+from .cost_guided_inference import Gr00tN1d6InferenceEngine
 import torch
 from torch import nn
 from torch.distributions import Beta
@@ -86,6 +87,7 @@ class Gr00tN1d6ActionHead(nn.Module):
         self.set_trainable_parameters(
             config.tune_projector, config.tune_diffusion_model, config.tune_vlln
         )
+        self.inference_engine = Gr00tN1d6InferenceEngine(self)
 
     def set_trainable_parameters(
         self, tune_projector: bool, tune_diffusion_model: bool, tune_vlln: bool
@@ -285,6 +287,53 @@ class Gr00tN1d6ActionHead(nn.Module):
 
         return BatchFeature(data={"backbone_features": vl_embeds, "state_features": state_features})
 
+    def _predict_velocity(
+        self,
+        actions: torch.Tensor,
+        t_cont: float,
+        backbone_features: torch.Tensor,
+        state_features: torch.Tensor,
+        embodiment_id: torch.Tensor,
+        backbone_output: BatchFeature,
+    ) -> torch.Tensor:
+        batch_size = actions.shape[0]
+        device = actions.device
+        t_discretized = min(
+            self.num_timestep_buckets - 1,
+            int(t_cont * self.num_timestep_buckets),
+        )
+        timesteps_tensor = torch.full(
+            size=(batch_size,),
+            fill_value=t_discretized,
+            dtype=torch.long,
+            device=device,
+        )
+        action_features = self.action_encoder(actions, timesteps_tensor, embodiment_id)
+
+        if self.config.add_pos_embed:
+            pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
+            pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
+            action_features = action_features + pos_embs
+
+        sa_embs = torch.cat((state_features, action_features), dim=1)
+
+        if self.config.use_alternate_vl_dit:
+            model_output = self.model(
+                hidden_states=sa_embs,
+                encoder_hidden_states=backbone_features,
+                timestep=timesteps_tensor,
+                image_mask=backbone_output.image_mask,
+                backbone_attention_mask=backbone_output.backbone_attention_mask,
+            )
+        else:
+            model_output = self.model(
+                hidden_states=sa_embs,
+                encoder_hidden_states=backbone_features,
+                timestep=timesteps_tensor,
+            )
+        pred = self.action_decoder(model_output, embodiment_id)
+        return pred[:, -self.action_horizon :]
+
     @torch.no_grad()
     def get_action_with_features(
         self,
@@ -292,6 +341,7 @@ class Gr00tN1d6ActionHead(nn.Module):
         state_features: torch.Tensor,
         embodiment_id: torch.Tensor,
         backbone_output: BatchFeature,
+        raw_state: torch.Tensor | None = None,
     ) -> BatchFeature:
         """
         Generate actions using the flow matching diffusion process.
@@ -302,65 +352,12 @@ class Gr00tN1d6ActionHead(nn.Module):
             embodiment_id: [B] (embodiment IDs)
             backbone_output: Output from the backbone model
         """
-        vl_embeds = backbone_features
-
-        # Set initial actions as the sampled noise.
-        batch_size = vl_embeds.shape[0]
-        device = vl_embeds.device
-        actions = torch.randn(
-            size=(batch_size, self.config.action_horizon, self.action_dim),
-            dtype=vl_embeds.dtype,
-            device=device,
-        )
-
-        dt = 1.0 / self.num_inference_timesteps
-
-        # Run denoising steps.
-        for t in range(self.num_inference_timesteps):
-            t_cont = t / float(self.num_inference_timesteps)  # e.g. goes 0, 1/N, 2/N, ...
-            t_discretized = int(t_cont * self.num_timestep_buckets)
-
-            # Embed noised action trajectory.
-            timesteps_tensor = torch.full(
-                size=(batch_size,), fill_value=t_discretized, device=device
-            )
-            action_features = self.action_encoder(actions, timesteps_tensor, embodiment_id)
-            # Add position embedding.
-            if self.config.add_pos_embed:
-                pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
-                pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
-                action_features = action_features + pos_embs
-
-            # Join vision, language, state and action embedding along sequence dimension.
-            sa_embs = torch.cat((state_features, action_features), dim=1)
-
-            # Run model forward.
-            if self.config.use_alternate_vl_dit:
-                model_output = self.model(
-                    hidden_states=sa_embs,
-                    encoder_hidden_states=vl_embeds,
-                    timestep=timesteps_tensor,
-                    image_mask=backbone_output.image_mask,
-                    backbone_attention_mask=backbone_output.backbone_attention_mask,
-                )
-            else:
-                model_output = self.model(
-                    hidden_states=sa_embs,
-                    encoder_hidden_states=vl_embeds,
-                    timestep=timesteps_tensor,
-                )
-            pred = self.action_decoder(model_output, embodiment_id)
-
-            pred_velocity = pred[:, -self.action_horizon :]
-
-            # Update actions using euler integration.
-            actions = actions + dt * pred_velocity
-        return BatchFeature(
-            data={
-                "action_pred": actions,
-                "backbone_features": vl_embeds,
-                "state_features": state_features,
-            }
+        return self.inference_engine.sample(
+            backbone_features=backbone_features,
+            state_features=state_features,
+            embodiment_id=embodiment_id,
+            backbone_output=backbone_output,
+            raw_state=raw_state,
         )
 
     @torch.no_grad()
@@ -386,6 +383,7 @@ class Gr00tN1d6ActionHead(nn.Module):
             state_features=features.state_features,
             embodiment_id=action_input.embodiment_id,
             backbone_output=backbone_output,
+            raw_state=action_input.state,
         )
 
     @property
