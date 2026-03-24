@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import uuid
@@ -127,6 +128,7 @@ class VideoRecordingWrapper(gym.Wrapper):
         video_recorder: VideoRecorder,
         mode="rgb_array",
         video_dir: Path | None = None,
+        env_name: str | None = None,
         steps_per_render=1,
         max_episode_steps=720,
         overlay_text=True,
@@ -145,6 +147,7 @@ class VideoRecordingWrapper(gym.Wrapper):
         self.steps_per_render = steps_per_render
         self.max_episode_steps = max_episode_steps
         self.video_dir = video_dir
+        self.env_name = env_name
         self.video_recorder = video_recorder
         self.file_path = None
         self.overlay_text = overlay_text
@@ -152,6 +155,133 @@ class VideoRecordingWrapper(gym.Wrapper):
         self.step_count = 0
 
         self.is_success = False
+        self.frames = list()
+        self.trajectory_states = []
+        self.trajectory_actions = []
+        self.trajectory_rewards = []
+        self.trajectory_dones = []
+        self.trajectory_successes = []
+        self.trajectory_task_description = ""
+        self.episode_completed = False
+
+    def _extract_task_description(self, observation: dict) -> str:
+        for key in observation.keys():
+            if key.startswith("annotation.") or key.startswith("language."):
+                return observation[key]
+        return ""
+
+    def _extract_state_vector(self, observation: dict) -> np.ndarray | None:
+        state_keys = [
+            "state.x",
+            "state.y",
+            "state.z",
+            "state.roll",
+            "state.pitch",
+            "state.yaw",
+            "state.gripper",
+        ]
+        if not all(key in observation for key in state_keys):
+            return None
+        return np.concatenate(
+            [np.asarray(observation[key], dtype=np.float32) for key in state_keys],
+            axis=0,
+        )
+
+    def _reset_trajectory_buffers(self, observation: dict | None = None):
+        self.trajectory_states = []
+        self.trajectory_actions = []
+        self.trajectory_rewards = []
+        self.trajectory_dones = []
+        self.trajectory_successes = []
+        self.trajectory_task_description = ""
+        self.episode_completed = False
+
+        if observation is None:
+            return
+
+        self.trajectory_task_description = self._extract_task_description(observation)
+        state_vector = self._extract_state_vector(observation)
+        if state_vector is None:
+            return
+        self.trajectory_states.append(np.asarray(state_vector, dtype=np.float32))
+
+    def _save_trajectory(self, trajectory_path: Path):
+        if not self.trajectory_states or not self.trajectory_actions:
+            return
+
+        np.savez_compressed(
+            trajectory_path,
+            metadata_json=json.dumps(
+                {
+                    "env_name": self.env_name,
+                    "task_description": self.trajectory_task_description,
+                    "success": bool(self.is_success),
+                    "num_steps": len(self.trajectory_actions),
+                }
+            ),
+            states=np.stack(self.trajectory_states, axis=0),
+            actions=np.stack(self.trajectory_actions, axis=0),
+            rewards=np.asarray(self.trajectory_rewards, dtype=np.float32),
+            dones=np.asarray(self.trajectory_dones, dtype=np.bool_),
+            success_flags=np.asarray(self.trajectory_successes, dtype=np.bool_),
+        )
+
+    def _finalize_episode_outputs(self, previous_step_count: int):
+        if self.video_dir is None or self.file_path is None:
+            return
+
+        original_filestem = self.file_path.stem
+        new_filestem = f"{original_filestem}_s{int(self.is_success)}"
+
+        if "grasp_obj" in self.intermediate_signals:
+            new_filestem += f"_g-o{int(self.intermediate_signals['grasp_obj'])}"
+        if "grasp_distractor_obj" in self.intermediate_signals:
+            new_filestem += f"_not-g-d{int(not self.intermediate_signals['grasp_distractor_obj'])}"
+
+        if (
+            "grasp_obj" in self.intermediate_signals
+            and "grasp_distractor_obj" in self.intermediate_signals
+        ):
+            success = self.is_success
+            grasp_obj = self.intermediate_signals["grasp_obj"]
+            not_grasp_distractor_obj = not self.intermediate_signals["grasp_distractor_obj"]
+
+            if success:
+                if grasp_obj and not_grasp_distractor_obj:
+                    case_semantic = "case_1_follow_lang_good_motion"
+                else:
+                    case_semantic = "case_2_follow_lang_success_bad_motion"
+            else:
+                if grasp_obj and not_grasp_distractor_obj:
+                    case_semantic = "case_3_follow_lang_failed"
+                elif grasp_obj and not not_grasp_distractor_obj:
+                    case_semantic = "case_4_touch_both_objects"
+                elif (not grasp_obj) and not_grasp_distractor_obj:
+                    case_semantic = "case_5_grasp_neither_object"
+                else:
+                    case_semantic = "case_6_grasp_distractor_object"
+
+            language_following_rate = (
+                (success and grasp_obj and not_grasp_distractor_obj)
+                or (success and not (grasp_obj and not_grasp_distractor_obj))
+                or ((not success) and grasp_obj and not_grasp_distractor_obj)
+            )
+            new_filestem += f"_{case_semantic}_lf-rate{int(language_following_rate)}"
+
+        new_file_path = self.video_dir / f"{new_filestem}.mp4"
+        should_keep_episode = (
+            self.episode_completed or previous_step_count >= self.max_episode_steps or self.is_success
+        )
+        if should_keep_episode:
+            if self.file_path.exists():
+                os.rename(self.file_path, new_file_path)
+            trajectory_path = self.video_dir / f"{new_filestem}.npz"
+            self._save_trajectory(trajectory_path)
+        elif self.file_path.exists():
+            print(
+                f"Skipping video recording for unfinished episode {previous_step_count} / {self.max_episode_steps}"
+            )
+            os.remove(self.file_path)
 
     def _resize_frames_to_common_height(self, frames):
         """
@@ -191,137 +321,8 @@ class VideoRecordingWrapper(gym.Wrapper):
         self.step_count = 1
         self.video_recorder.stop()
 
-        if self.video_dir is not None and self.file_path is not None and self.file_path.exists():
-            # rename the file to indicate success or failure
-            original_filestem = self.file_path.stem
-            new_filestem = f"{original_filestem}_s{int(self.is_success)}"
-
-            # Add intermediate signals to the filename
-            if "grasp_obj" in self.intermediate_signals:
-                new_filestem += f"_g-o{int(self.intermediate_signals['grasp_obj'])}"
-            # We temporarily disable contact metrics because they are not as indicative
-            # if "contact_obj" in self.intermediate_signals:
-            #     new_filestem += f"_c-o{int(self.intermediate_signals['contact_obj'])}"
-            if "grasp_distractor_obj" in self.intermediate_signals:
-                new_filestem += (
-                    f"_not-g-d{int(not self.intermediate_signals['grasp_distractor_obj'])}"
-                )
-            # We temporarily disable contact metrics because they are not as indicative
-            # if "contact_distractor_obj" in self.intermediate_signals:
-            #     new_filestem += (
-            #         f"_not-c-d{int(not self.intermediate_signals['contact_distractor_obj'])}"
-            #     )
-            # The distance metrics are not very informative, so we have excluded them
-            # if (
-            #     "gripper_obj_dist" in self.intermediate_signals
-            #     and "gripper_distractor_dist" in self.intermediate_signals
-            # ):
-            #     min_gripper_obj_dist = self.intermediate_signals["gripper_obj_dist"]
-            #     min_gripper_distractor_dist = self.intermediate_signals["gripper_distractor_dist"]
-            #     gripper_obj_dist_lt_gripper_distractor_dist = (
-            #         min_gripper_obj_dist < min_gripper_distractor_dist
-            #     )
-            #     new_filestem += (
-            #         f"_o-lt-d{int(gripper_obj_dist_lt_gripper_distractor_dist)}"
-            #     )
-            #     new_filestem += f"_o-dist{min_gripper_obj_dist:.4f}"
-            #     new_filestem += f"_d-dist{min_gripper_distractor_dist:.4f}"
-
-            # Add language following metrics to the filename
-            if (
-                "grasp_obj" in self.intermediate_signals
-                and "grasp_distractor_obj" in self.intermediate_signals
-            ):
-                success = self.is_success
-                grasp_obj = self.intermediate_signals["grasp_obj"]
-                not_grasp_distractor_obj = not self.intermediate_signals["grasp_distractor_obj"]
-
-                # 6 cases in total
-                cases = [False] * 6
-
-                if success:
-                    if grasp_obj and not_grasp_distractor_obj:
-                        # case 1: follow language, good motion
-                        cases[0] = True
-                        case_semantic = "case_1_follow_lang_good_motion"
-                    else:
-                        # case 2: follow language and success, but probably bad motion
-                        cases[1] = True
-                        case_semantic = "case_2_follow_lang_success_bad_motion"
-                else:
-                    if grasp_obj and not_grasp_distractor_obj:
-                        # case 3: follow language, but bad motion
-                        cases[2] = True
-                        case_semantic = "case_3_follow_lang_failed"
-                    elif grasp_obj and not not_grasp_distractor_obj:
-                        # case 4: touches both objects, not sure whether it follows language, but very likely bad motion
-                        cases[3] = True
-                        case_semantic = "case_4_touch_both_objects"
-                    elif (not grasp_obj) and not_grasp_distractor_obj:
-                        # case 5: grasp neither object, so very likely bad motion
-                        cases[4] = True
-                        case_semantic = "case_5_grasp_neither_object"
-                    else:
-                        # case 6: grasp distractor object, so it doesn't follow language
-                        cases[5] = True
-                        case_semantic = "case_6_grasp_distractor_object"
-
-                language_following_rate = cases[0] or cases[1] or cases[2]
-
-                # Add language following metrics to the filename
-                # Because the 6 cases are mutually exclusive, we can just use the semantic meaning of the cases
-                new_filestem += f"_{case_semantic}_lf-rate{int(language_following_rate)}"
-
-            # We temporarily disable contact metrics because they are not as indicative
-            # if (
-            #     "contact_obj" in self.intermediate_signals
-            #     and "contact_distractor_obj" in self.intermediate_signals
-            # ):
-            #     success = self.is_success
-            #     contact_obj = self.intermediate_signals["contact_obj"]
-            #     not_contact_distractor_obj = not self.intermediate_signals["contact_distractor_obj"]
-
-            #     # 6 cases in total
-            #     cases = [False] * 6
-
-            #     if success:
-            #         if contact_obj and not_contact_distractor_obj:
-            #             # case 7: follow language, good motion
-            #             cases[0] = True
-            #             case_semantic = "case_7_follow_lang_good_motion"
-            #         else:
-            #             # case 8: follow language and success, but probably bad motion
-            #             cases[1] = True
-            #             case_semantic = "case_8_follow_lang_success_bad_motion"
-            #     else:
-            #         if contact_obj and not_contact_distractor_obj:
-            #             # case 9: follow language, but bad motion
-            #             cases[2] = True
-            #             case_semantic = "case_9_follow_lang_failed"
-            #         elif contact_obj and not not_contact_distractor_obj:
-            #             # case 10: touches both objects, not sure whether it follows language, but very likely bad motion
-            #             cases[3] = True
-            #             case_semantic = "case_10_touch_both_objects"
-            #         elif (not contact_obj) and not_contact_distractor_obj:
-            #             # case 11: contact neither object, so very likely bad motion
-            #             cases[4] = True
-            #             case_semantic = "case_11_contact_neither_object"
-            #         else:
-            #             # case 12: contact distractor object, so it doesn't follow language
-            #             cases[5] = True
-            #             case_semantic = "case_12_contact_distractor_object"
-
-            #     contact_language_following_rate = cases[0] or cases[1] or cases[2]
-            #     new_filestem += f"_{case_semantic}_clf-rate{int(contact_language_following_rate)}"
-
-            new_file_path = self.video_dir / f"{new_filestem}.mp4"
-            if previous_step_count >= self.max_episode_steps or self.is_success:
-                os.rename(self.file_path, new_file_path)
-            else:
-                print(
-                    f"Skipping video recording for unfinished episode {previous_step_count} / {self.max_episode_steps}"
-                )
-                os.remove(self.file_path)
+        if self.video_dir is not None and self.file_path is not None:
+            self._finalize_episode_outputs(previous_step_count)
 
         self.is_success = False
         # "intermediate_signals" contain the metrics for 5DC tasks to indicate language following
@@ -329,6 +330,7 @@ class VideoRecordingWrapper(gym.Wrapper):
 
         if self.video_dir is not None:
             self.file_path = self.video_dir / f"{uuid.uuid4()}.mp4"
+        self._reset_trajectory_buffers(result[0])
         return result
 
     def step(self, action):
@@ -423,6 +425,14 @@ class VideoRecordingWrapper(gym.Wrapper):
 
         info = result[-1]
         self.is_success |= info["success"]
+        if "executed_action_vector" in info and "trajectory_state_vector" in info:
+            self.trajectory_actions.append(np.asarray(info["executed_action_vector"], dtype=np.float32))
+            self.trajectory_states.append(np.asarray(info["trajectory_state_vector"], dtype=np.float32))
+            self.trajectory_rewards.append(float(result[1]))
+            self.trajectory_dones.append(bool(result[2] or result[3]))
+            self.trajectory_successes.append(bool(info["success"]))
+            self.trajectory_task_description = self._extract_task_description(result[0])
+            self.episode_completed |= bool(result[2] or result[3])
 
         # Update intermediate signals
         if "intermediate_signals" in info:

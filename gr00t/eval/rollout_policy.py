@@ -217,6 +217,7 @@ def create_eval_env(
             env,
             video_recorder,
             video_dir=Path(wrapper_configs.video.video_dir),
+            env_name=env_name,
             steps_per_render=wrapper_configs.video.steps_per_render,
             max_episode_steps=wrapper_configs.video.max_episode_steps,
             overlay_text=wrapper_configs.video.overlay_text,

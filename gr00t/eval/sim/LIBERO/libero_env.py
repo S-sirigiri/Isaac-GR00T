@@ -140,6 +140,20 @@ class LiberoEnv(gym.Env):
         }
         return new_obs
 
+    def _pack_state_vector(self, observation: dict[str, np.ndarray]) -> np.ndarray:
+        return np.concatenate(
+            [
+                observation["state.x"],
+                observation["state.y"],
+                observation["state.z"],
+                observation["state.roll"],
+                observation["state.pitch"],
+                observation["state.yaw"],
+                observation["state.gripper"],
+            ],
+            axis=0,
+        ).astype(np.float32, copy=False)
+
     def reset(self, seed=None, options=None):
         observation = self._env.reset()
         observation = self._process_observation(observation)
@@ -158,12 +172,13 @@ class LiberoEnv(gym.Env):
                 action["action.gripper"],
             ],
             axis=0,
-        )
-        action_vector = normalize_gripper_action(action_vector)
-        action_vector = invert_gripper_action(action_vector)
-        observation, reward, done, info = self._env.step(action_vector)
-        observation = self._process_observation(observation)
+        ).astype(np.float32, copy=True)
+        executed_action = invert_gripper_action(normalize_gripper_action(action_vector.copy()))
+        raw_observation, reward, done, info = self._env.step(executed_action)
+        observation = self._process_observation(raw_observation)
         info["success"] = self._env.check_success()
+        info["executed_action_vector"] = executed_action.astype(np.float32, copy=True)
+        info["trajectory_state_vector"] = self._pack_state_vector(observation)
         truncated = False
         return observation, reward, done, truncated, info
 
