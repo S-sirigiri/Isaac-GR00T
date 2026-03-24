@@ -83,6 +83,9 @@ class CostConstraintObjective:
     ) -> torch.Tensor:
         return torch.as_tensor(value, dtype=ref.dtype, device=ref.device)
 
+    def _smooth_max(self, values: torch.Tensor) -> torch.Tensor:
+        return torch.logsumexp(self.softplus_beta * values, dim=-1) / self.softplus_beta
+
     def _batch_actions(self, actions: torch.Tensor) -> torch.Tensor:
         if actions.ndim == 3:
             return actions
@@ -242,6 +245,39 @@ class CostConstraintObjective:
             position[-1] - target
         ).square().sum()
 
+    def _cylinder_avoidance_penalty(self, position: torch.Tensor) -> torch.Tensor:
+        # Task-specific obstacle geometry from the LIBERO cylinder scene.
+        cylinder_center_xy = self._as_like([-0.01145, 0.02955], position)
+        cylinder_center_z = self._as_like(0.20, position)
+
+        cylinder_radius = 0.02
+        cylinder_half_height = 0.20
+        epsilon = 0.05
+
+        delta_xy = position[..., :2] - cylinder_center_xy
+        radial_distance = torch.sqrt(delta_xy.square().sum(dim=-1) + 1.0e-12)
+
+        radial_clearance = radial_distance - (cylinder_radius + epsilon)
+        vertical_clearance = torch.abs(position[..., 2] - cylinder_center_z) - (
+            cylinder_half_height + epsilon
+        )
+
+        clearance = self._smooth_max(
+            torch.stack([radial_clearance, vertical_clearance], dim=-1)
+        )
+        violation = F.softplus(-self.softplus_beta * clearance) / self.softplus_beta
+        return violation.square().sum()
+
+    def _nonnegative_y_penalty(self, position: torch.Tensor) -> torch.Tensor:
+        y_position = position[..., 1]
+        violation = F.softplus(self.softplus_beta * y_position) / self.softplus_beta
+        return violation.square().sum()
+
+    def _nonnegative_x_penalty(self, position: torch.Tensor) -> torch.Tensor:
+        x_position = position[..., 0]
+        violation = F.softplus(self.softplus_beta * x_position) / self.softplus_beta
+        return violation.square().sum()
+
     def _inequality_penalty_single(
         self,
         actions: torch.Tensor,
@@ -249,37 +285,12 @@ class CostConstraintObjective:
         embodiment_id: int,
     ) -> torch.Tensor:
         view = self._extract_view(actions, states, embodiment_id)
-        total = actions.new_zeros(())
-
         position = view["action_position"]
-        if position is not None and position.shape[-1] >= 3:
-            z_min = float(self.placeholder_terms.get("z_min", -1.0))
-            z_violation = F.softplus(self.softplus_beta * (z_min - position[..., 2])) / self.softplus_beta
-            total = total + float(self.placeholder_terms.get("z_barrier_weight", 1.0)) * (
-                z_violation.square().sum()
-            )
+        if position is None or position.shape[-1] < 2:
+            return actions.new_zeros(())
 
-        gripper = view["action_gripper"]
-        if gripper is not None:
-            gripper_min = self.placeholder_terms.get("gripper_min")
-            gripper_max = self.placeholder_terms.get("gripper_max")
-            gripper_weight = float(self.placeholder_terms.get("gripper_bound_weight", 0.25))
-
-            if gripper_min is not None:
-                min_violation = (
-                    F.softplus(self.softplus_beta * (float(gripper_min) - gripper))
-                    / self.softplus_beta
-                )
-                total = total + gripper_weight * min_violation.square().sum()
-
-            if gripper_max is not None:
-                max_violation = (
-                    F.softplus(self.softplus_beta * (gripper - float(gripper_max)))
-                    / self.softplus_beta
-                )
-                total = total + gripper_weight * max_violation.square().sum()
-
-        return total
+        return self._cylinder_avoidance_penalty(position)
+        #return self._nonnegative_x_penalty(position) + self._nonnegative_y_penalty(position)
 
     def cost(
         self,
