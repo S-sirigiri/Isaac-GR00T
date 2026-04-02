@@ -108,7 +108,7 @@ source .venv/bin/activate
 
 Or manually:
 ```bash
-uv sync
+uv sync --python 3.10
 uv pip install -e .
 ```
 
