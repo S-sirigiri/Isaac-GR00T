@@ -1,5 +1,4 @@
-mode: linear_combo
-
+mode: vanilla
 time_grid:
   num_steps: 4
 
@@ -38,7 +37,7 @@ objective:
     gripper_smoothness_weight: 0.05
     terminal_position_weight: 1.0
     target_position: [0.0, 0.0, 0.0]
-    softplus_beta: 10.0
+    softplus_beta: 1000.0
 
 embodiments:
   0:
@@ -100,7 +99,7 @@ embodiments:
   2:
     name: libero_panda
     control_kind: eef
-    objective_space: decoded_cartesian
+    objective_space: normalized
     action_layout:
       position_idx: [0, 1, 2]
       rotation_idx: [3, 4, 5]
@@ -109,21 +108,20 @@ embodiments:
       position_idx: [0, 1, 2]
       rotation_idx: [3, 4, 5]
       gripper_idx: [6]
-    decoder:
-      action:
+    constraint_trajectory:
+      kind: libero_osc_delta_rollout
+      source: runtime_true_eef_position
+      controller:
         position:
-          kind: identity
+          input_min: [-1.0, -1.0, -1.0]
+          input_max: [1.0, 1.0, 1.0]
+          output_min: [-0.05, -0.05, -0.05]
+          output_max: [0.05, 0.05, 0.05]
         rotation:
-          kind: identity
-        gripper:
-          kind: identity
-      state:
-        position:
-          kind: identity
-        rotation:
-          kind: identity
-        gripper:
-          kind: identity
+          input_min: [-1.0, -1.0, -1.0]
+          input_max: [1.0, 1.0, 1.0]
+          output_min: [-0.5, -0.5, -0.5]
+          output_max: [0.5, 0.5, 0.5]
 
   8:
     name: unitree_g1
