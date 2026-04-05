@@ -54,7 +54,9 @@ class Gr00tN1d6InferenceEngine:
         state_features: torch.Tensor,
         embodiment_id: torch.Tensor,
         backbone_output: BatchFeature,
-        raw_state: Optional[torch.Tensor] = None,
+        objective_state: Optional[torch.Tensor] = None,
+        constraint_state: Optional[torch.Tensor] = None,
+        constraint_context: Optional[dict[str, Any]] = None,
     ) -> BatchFeature:
         config = self.config_loader.load()
         mode = config.get("mode", "vanilla")
@@ -73,7 +75,9 @@ class Gr00tN1d6InferenceEngine:
                 state_features=state_features,
                 embodiment_id=embodiment_id,
                 backbone_output=backbone_output,
-                raw_state=raw_state,
+                objective_state=objective_state,
+                constraint_state=constraint_state,
+                constraint_context=constraint_context,
             )
         elif mode == "fkc":
             actions = self._fkc_sample(
@@ -82,7 +86,9 @@ class Gr00tN1d6InferenceEngine:
                 state_features=state_features,
                 embodiment_id=embodiment_id,
                 backbone_output=backbone_output,
-                raw_state=raw_state,
+                objective_state=objective_state,
+                constraint_state=constraint_state,
+                constraint_context=constraint_context,
             )
         else:
             raise ValueError(f"Unsupported inference mode: {mode}")
@@ -263,7 +269,9 @@ class Gr00tN1d6InferenceEngine:
         state_features: torch.Tensor,
         embodiment_id: torch.Tensor,
         backbone_output: BatchFeature,
-        raw_state: Optional[torch.Tensor],
+        objective_state: Optional[torch.Tensor],
+        constraint_state: Optional[torch.Tensor],
+        constraint_context: Optional[dict[str, Any]],
     ) -> torch.Tensor:
         objective = self._build_objective(config)
         objective.validate_embodiment_ids(embodiment_id)
@@ -290,7 +298,13 @@ class Gr00tN1d6InferenceEngine:
             score = self._score_from_velocity(actions, velocity, t_cont, config)
             beta_t = self._beta_schedule(t_cont, config)
 
-            _, grad_actions = objective.J_and_grad(actions, raw_state, embodiment_id)
+            _, grad_actions = objective.J_and_grad(
+                actions,
+                objective_state,
+                embodiment_id,
+                constraint_state=constraint_state,
+                runtime_context=constraint_context,
+            )
             drift = velocity + 0.5 * sigma_t.square() * (score + beta_t * grad_actions)
             noise = sigma_t * math.sqrt(dt) * torch.randn_like(actions)
             actions = actions + dt * drift + noise
@@ -304,7 +318,9 @@ class Gr00tN1d6InferenceEngine:
         state_features: torch.Tensor,
         embodiment_id: torch.Tensor,
         backbone_output: BatchFeature,
-        raw_state: Optional[torch.Tensor],
+        objective_state: Optional[torch.Tensor],
+        constraint_state: Optional[torch.Tensor],
+        constraint_context: Optional[dict[str, Any]],
     ) -> torch.Tensor:
         objective = self._build_objective(config)
         objective.validate_embodiment_ids(embodiment_id)
@@ -331,7 +347,9 @@ class Gr00tN1d6InferenceEngine:
         state_features_exp = self._repeat_batch(state_features, num_particles)
         embodiment_id_exp = self._repeat_batch(embodiment_id, num_particles)
         backbone_output_exp = self._repeat_batch(backbone_output, num_particles)
-        raw_state_exp = self._repeat_batch(raw_state, num_particles)
+        objective_state_exp = self._repeat_batch(objective_state, num_particles)
+        constraint_state_exp = self._repeat_batch(constraint_state, num_particles)
+        constraint_context_exp = self._repeat_batch(constraint_context, num_particles)
 
         for step_idx in range(num_steps):
             t_cont = step_idx / float(num_steps)
@@ -350,7 +368,13 @@ class Gr00tN1d6InferenceEngine:
             beta_t = self._beta_schedule(t_cont, config)
             beta_next = self._beta_schedule(next_t, config)
 
-            objective_value, grad_actions = objective.J_and_grad(actions, raw_state_exp, embodiment_id_exp)
+            objective_value, grad_actions = objective.J_and_grad(
+                actions,
+                objective_state_exp,
+                embodiment_id_exp,
+                constraint_state=constraint_state_exp,
+                runtime_context=constraint_context_exp,
+            )
             drift = velocity + 0.5 * sigma_t.square() * (score + beta_t * grad_actions)
             noise = sigma_t * math.sqrt(dt) * torch.randn_like(actions)
             actions = actions + dt * drift + noise

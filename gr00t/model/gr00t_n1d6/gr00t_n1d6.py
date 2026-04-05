@@ -341,7 +341,9 @@ class Gr00tN1d6ActionHead(nn.Module):
         state_features: torch.Tensor,
         embodiment_id: torch.Tensor,
         backbone_output: BatchFeature,
-        raw_state: torch.Tensor | None = None,
+        objective_state: torch.Tensor | None = None,
+        constraint_state: torch.Tensor | None = None,
+        constraint_context: dict | None = None,
     ) -> BatchFeature:
         """
         Generate actions using the flow matching diffusion process.
@@ -357,7 +359,9 @@ class Gr00tN1d6ActionHead(nn.Module):
             state_features=state_features,
             embodiment_id=embodiment_id,
             backbone_output=backbone_output,
-            raw_state=raw_state,
+            objective_state=objective_state,
+            constraint_state=constraint_state,
+            constraint_context=constraint_context,
         )
 
     @torch.no_grad()
@@ -378,12 +382,18 @@ class Gr00tN1d6ActionHead(nn.Module):
                 - action_pred: [B, action_horizon, action_dim] predicted actions
         """
         features = self._encode_features(backbone_output, action_input)
+        constraint_state = action_input["constraint_state"] if "constraint_state" in action_input else None
+        constraint_context = (
+            action_input["constraint_context"] if "constraint_context" in action_input else None
+        )
         return self.get_action_with_features(
             backbone_features=features.backbone_features,
             state_features=features.state_features,
             embodiment_id=action_input.embodiment_id,
             backbone_output=backbone_output,
-            raw_state=action_input.state,
+            objective_state=action_input.state,
+            constraint_state=constraint_state,
+            constraint_context=constraint_context,
         )
 
     @property
@@ -510,10 +520,17 @@ class Gr00tN1d6(PreTrainedModel):
 
         return action_outputs
 
-    def get_action(self, inputs: dict) -> BatchFeature:
+    def get_action(self, inputs: dict | None = None, **kwargs) -> BatchFeature:
         """
         Generate actions using the complete model.
         """
+        if inputs is None:
+            inputs = kwargs
+        elif kwargs:
+            merged_inputs = dict(inputs)
+            merged_inputs.update(kwargs)
+            inputs = merged_inputs
+
         # Prepare inputs for backbone and action head
         backbone_inputs, action_inputs = self.prepare_input(inputs)
 
