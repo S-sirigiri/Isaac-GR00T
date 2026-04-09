@@ -43,6 +43,10 @@ def _rec_to_dtype(x: Any, dtype: torch.dtype) -> Any:
         return x
 
 
+def _np_to_torch_float(value: np.ndarray | list[float] | tuple[float, ...]) -> torch.Tensor:
+    return torch.from_numpy(np.asarray(value, dtype=np.float32))
+
+
 class Gr00tPolicy(BasePolicy):
     """Core policy class for Gr00t model inference.
 
@@ -92,6 +96,7 @@ class Gr00tPolicy(BasePolicy):
         self.embodiment_tag = embodiment_tag
         self.modality_configs = self.processor.get_modality_configs()[self.embodiment_tag.value]
         self.collate_fn = self.processor.collator
+        self.libero_constraint_context_template = self._build_libero_constraint_context_template()
 
         # Extract and validate language configuration
         # Currently only supports single language input per timestep
@@ -337,6 +342,14 @@ class Gr00tPolicy(BasePolicy):
         # Step 3: Collate processed inputs into a single batch for model
         collated_inputs = self.collate_fn(processed_inputs)
         collated_inputs = _rec_to_dtype(collated_inputs, dtype=torch.bfloat16)
+        if (
+            self.embodiment_tag == EmbodimentTag.LIBERO_PANDA
+            and self.libero_constraint_context_template is not None
+        ):
+            collated_inputs["constraint_state"] = self._build_libero_constraint_state(states)
+            collated_inputs["constraint_context"] = self._expand_constraint_context_template(
+                len(states)
+            )
 
         # Step 4: Run model inference to predict actions
         with torch.inference_mode():
@@ -356,6 +369,67 @@ class Gr00tPolicy(BasePolicy):
             key: value.astype(np.float32) for key, value in unnormalized_action.items()
         }
         return casted_action, {}
+
+    def _build_libero_constraint_context_template(self) -> dict[str, torch.Tensor] | None:
+        if self.embodiment_tag != EmbodimentTag.LIBERO_PANDA:
+            return None
+
+        norm_params = self.processor.state_action_processor.norm_params
+        action_norm_params = norm_params[self.embodiment_tag.value]["action"]
+
+        def _as_1x3_tensor(field: str) -> torch.Tensor:
+            return torch.tensor(
+                [
+                    float(action_norm_params["x"][field]),
+                    float(action_norm_params["y"][field]),
+                    float(action_norm_params["z"][field]),
+                ],
+                dtype=torch.float32,
+            ).unsqueeze(0)
+
+        use_meanstd = bool(action_norm_params["x"].get("use_meanstd", False))
+        if any(
+            bool(action_norm_params[axis].get("use_meanstd", False)) != use_meanstd
+            for axis in ("y", "z")
+        ):
+            raise ValueError("Expected LIBERO xyz action normalization to use a shared use_meanstd flag")
+
+        return {
+            "action_position": {
+                "use_meanstd": torch.tensor([use_meanstd], dtype=torch.bool),
+                "min": _as_1x3_tensor("min"),
+                "max": _as_1x3_tensor("max"),
+                "mean": _as_1x3_tensor("mean"),
+                "std": _as_1x3_tensor("std"),
+            }
+        }
+
+    def _expand_constraint_context_template(self, batch_size: int) -> dict[str, torch.Tensor] | None:
+        if self.libero_constraint_context_template is None:
+            return None
+
+        expanded_context = {}
+        for key, value in self.libero_constraint_context_template.items():
+            if isinstance(value, dict):
+                expanded_context[key] = {
+                    sub_key: sub_value.expand(batch_size, *sub_value.shape[1:])
+                    for sub_key, sub_value in value.items()
+                }
+            else:
+                expanded_context[key] = value.expand(batch_size, *value.shape[1:])
+        return expanded_context
+
+    def _build_libero_constraint_state(
+        self,
+        states: list[dict[str, np.ndarray]],
+    ) -> torch.Tensor:
+        return torch.tensor(
+            [
+                [float(state["x"][-1, 0]), float(state["y"][-1, 0]), float(state["z"][-1, 0])]
+                for state in states
+            ],
+            dtype=torch.float32,
+        )
 
     def check_action(self, action: dict[str, Any]) -> None:
         """Validate that the action has the correct structure and types.

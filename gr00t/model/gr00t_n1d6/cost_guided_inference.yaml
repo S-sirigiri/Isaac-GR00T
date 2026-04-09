@@ -1,4 +1,4 @@
-mode: vanilla
+mode: fkc
 time_grid:
   num_steps: 4
 
@@ -15,7 +15,7 @@ sigma_schedule:
 
 beta_schedule:
   kind: constant
-  guidance_strength: 1000.0
+  guidance_strength: 0.0
 
 linear_combo: {}
 
@@ -30,14 +30,14 @@ objective:
   weights:
     cost: 0.0
     equality: 0.0
-    inequality: 1000.0
+    inequality: 1.0
   placeholder_terms:
     position_smoothness_weight: 1.0
     rotation_smoothness_weight: 0.1
     gripper_smoothness_weight: 0.05
     terminal_position_weight: 1.0
     target_position: [0.0, 0.0, 0.0]
-    softplus_beta: 1000.0
+    softplus_beta: 10.0
 
 embodiments:
   0:

@@ -301,6 +301,7 @@ class CostConstraintObjective:
         states: Optional[torch.Tensor],
         embodiment_id: int,
     ) -> torch.Tensor:
+        # Legacy OCT/action-delta smoothness objective kept for reference.
         view = self._extract_view(actions, states, embodiment_id)
         total = actions.new_zeros(())
 
@@ -346,6 +347,48 @@ class CostConstraintObjective:
             position[-1] - target
         ).square().sum()
 
+    def _trajectory_positions_single(
+        self,
+        actions: torch.Tensor,
+        states: Optional[torch.Tensor],
+        embodiment_id: int,
+        constraint_state: Optional[torch.Tensor] = None,
+        runtime_context: Optional[dict[str, Any]] = None,
+    ) -> Optional[torch.Tensor]:
+        spec = self._get_embodiment_spec(embodiment_id)
+        rollout_cfg = spec.get("constraint_trajectory", {})
+        if rollout_cfg.get("kind") == "libero_osc_delta_rollout":
+            return self._reconstruct_libero_world_positions(
+                actions,
+                states,
+                embodiment_id,
+                constraint_state,
+                runtime_context,
+            )
+
+        view = self._extract_view(actions, states, embodiment_id)
+        return view["action_position"]
+
+    def _world_x_cost_single(
+        self,
+        actions: torch.Tensor,
+        states: Optional[torch.Tensor],
+        embodiment_id: int,
+        constraint_state: Optional[torch.Tensor] = None,
+        runtime_context: Optional[dict[str, Any]] = None,
+    ) -> torch.Tensor:
+        position = self._trajectory_positions_single(
+            actions,
+            states,
+            embodiment_id,
+            constraint_state=constraint_state,
+            runtime_context=runtime_context,
+        )
+        if position is None or position.shape[-1] < 1:
+            return actions.new_zeros(())
+
+        return position[..., 0].mean()
+
     """def _cylinder_avoidance_penalty(self, position: torch.Tensor) -> torch.Tensor:
         # Task-specific obstacle geometry from the LIBERO cylinder scene.
         cylinder_center_xy = self._as_like([-0.01145, 0.02955], position)
@@ -375,12 +418,52 @@ class CostConstraintObjective:
         cylinder_center_xy = self._as_like([-0.01145, 0.02955], position)
 
         cylinder_radius = 0.02
-        epsilon = 0.00
+        epsilon = 0.01
 
         delta_xy = position[..., :2] - cylinder_center_xy
         radial_distance = torch.sqrt(delta_xy.square().sum(dim=-1) + 1.0e-12)
 
         radial_clearance = radial_distance - (cylinder_radius + epsilon)
+        #violation = F.softplus(-self.softplus_beta * radial_clearance) / self.softplus_beta
+        violation = torch.clamp(-radial_clearance, min=0.0)
+        print(violation.abs().sum())
+        return violation.abs().sum()
+    
+    def _cylinder_avoidance_penalty_squared_hinge(self, position: torch.Tensor) -> torch.Tensor:
+        cylinder_center_xy = self._as_like([-0.01145, 0.02955], position)
+
+        cylinder_radius = 0.02
+        epsilon = 0.00
+        effective_radius = cylinder_radius + epsilon
+
+        delta_xy = position[..., :2] - cylinder_center_xy
+        squared_distance = delta_xy.square().sum(dim=-1)
+        print(effective_radius**2 - squared_distance)
+
+        violation = torch.clamp(effective_radius**2 - squared_distance, min=0.0)
+        return violation.sum()
+
+
+    def _ellipse_avoidance_penalty(self, position: torch.Tensor) -> torch.Tensor:
+        ellipse_center_xy = self._as_like([-0.01145, 0.02955], position)
+
+        # Hard-coded ellipse parameters. Axis lengths are semi-axes in meters.
+        long_axis = self._as_like(0.15, position)
+        short_axis = self._as_like(0.04, position)
+        rotation_deg = self._as_like(90.0, position)
+
+        theta = torch.deg2rad(rotation_deg)
+        cos_theta = torch.cos(theta)
+        sin_theta = torch.sin(theta)
+
+        delta_xy = position[..., :2] - ellipse_center_xy
+        x_rot = cos_theta * delta_xy[..., 0] + sin_theta * delta_xy[..., 1]
+        y_rot = -sin_theta * delta_xy[..., 0] + cos_theta * delta_xy[..., 1]
+
+        normalized_radius = torch.sqrt(
+            (x_rot / long_axis).square() + (y_rot / short_axis).square() + 1.0e-12
+        )
+        radial_clearance = (normalized_radius - 1.0) * torch.minimum(long_axis, short_axis)
         violation = F.softplus(-self.softplus_beta * radial_clearance) / self.softplus_beta
         return violation.square().sum()
 
@@ -469,23 +552,20 @@ class CostConstraintObjective:
         constraint_state: Optional[torch.Tensor] = None,
         runtime_context: Optional[dict[str, Any]] = None,
     ) -> torch.Tensor:
-        spec = self._get_embodiment_spec(embodiment_id)
-        rollout_cfg = spec.get("constraint_trajectory", {})
-        if rollout_cfg.get("kind") == "libero_osc_delta_rollout":
-            position = self._reconstruct_libero_world_positions(
-                actions,
-                states,
-                embodiment_id,
-                constraint_state,
-                runtime_context,
-            )
-        else:
-            view = self._extract_view(actions, states, embodiment_id)
-            position = view["action_position"]
+        position = self._trajectory_positions_single(
+            actions,
+            states,
+            embodiment_id,
+            constraint_state=constraint_state,
+            runtime_context=runtime_context,
+        )
         if position is None or position.shape[-1] < 2:
             return actions.new_zeros(())
 
-        return self._cylinder_avoidance_penalty(position)
+
+        #return self._cylinder_avoidance_penalty(position)
+        return self._cylinder_avoidance_penalty_squared_hinge(position)
+        #return self._ellipse_avoidance_penalty(position)
         #return self._xy_box_penalty(position)
         #return self._nonnegative_x_penalty(position) + self._nonnegative_y_penalty(position) + self._nonnegative_x_penalty_(position) + self._nonnegative_y_penalty_(position) 
 
@@ -494,15 +574,31 @@ class CostConstraintObjective:
         actions: torch.Tensor,
         states: Optional[torch.Tensor],
         embodiment_id: torch.Tensor | int | list[int] | tuple[int, ...],
+        constraint_state: Optional[torch.Tensor] = None,
+        runtime_context: Optional[dict[str, Any]] = None,
     ) -> torch.Tensor:
         batch_actions = self._batch_actions(actions)
         batch_states = self._batch_states(states, batch_actions.shape[0])
+        batch_constraint_state = self._batch_states(constraint_state, batch_actions.shape[0])
 
         embodiment_ids = self._normalize_embodiment_ids(embodiment_id, batch_actions.shape[0])
         outputs = []
         for batch_index, current_id in enumerate(embodiment_ids):
             state_item = None if batch_states is None else batch_states[batch_index]
-            outputs.append(self._cost_single(batch_actions[batch_index], state_item, current_id))
+            constraint_state_item = (
+                None if batch_constraint_state is None else batch_constraint_state[batch_index]
+            )
+            runtime_context_item = self._select_batch_item(runtime_context, batch_index)
+            # outputs.append(self._cost_single(batch_actions[batch_index], state_item, current_id))
+            outputs.append(
+                self._world_x_cost_single(
+                    batch_actions[batch_index],
+                    state_item,
+                    current_id,
+                    constraint_state=constraint_state_item,
+                    runtime_context=runtime_context_item,
+                )
+            )
         return torch.stack(outputs, dim=0)
 
     def equality_penalty(
@@ -563,7 +659,14 @@ class CostConstraintObjective:
         runtime_context: Optional[dict[str, Any]] = None,
     ) -> torch.Tensor:
         return (
-            self.cost_weight * self.cost(actions, states, embodiment_id)
+            self.cost_weight
+            * self.cost(
+                actions,
+                states,
+                embodiment_id,
+                constraint_state=constraint_state,
+                runtime_context=runtime_context,
+            )
             + self.equality_weight * self.equality_penalty(actions, states, embodiment_id)
             + self.inequality_weight
             * self.inequality_penalty(
