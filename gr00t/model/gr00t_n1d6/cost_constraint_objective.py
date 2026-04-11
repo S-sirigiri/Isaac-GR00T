@@ -224,7 +224,13 @@ class CostConstraintObjective:
 
         input_transform = 0.5 * (input_max + input_min)
         output_transform = 0.5 * (output_max + output_min)
-        return (value - input_transform) * action_scale + output_transform
+        commanded_delta = (value - input_transform) * action_scale + output_transform
+
+        tracking_gain_cfg = controller_cfg.get("tracking_gain")
+        if tracking_gain_cfg is None:
+            return commanded_delta
+        tracking_gain = self._as_like(tracking_gain_cfg, commanded_delta)
+        return commanded_delta * tracking_gain
 
     def _reconstruct_libero_world_positions(
         self,
@@ -246,6 +252,16 @@ class CostConstraintObjective:
         action_position = view["action_position"]
         if action_position is None or action_position.shape[-1] < 3:
             return None
+
+        # Only the first `executed_steps` chunks of the action horizon will
+        # actually be played on the real robot (the rollout wrapper drops the
+        # tail and re-plans). Truncating here keeps the proxy trajectory
+        # aligned with what the constraint will actually affect.
+        executed_steps = rollout_cfg.get("executed_steps")
+        if executed_steps is not None:
+            executed_steps = int(executed_steps)
+            if executed_steps > 0:
+                action_position = action_position[:executed_steps]
 
         current_position = constraint_state[-1] if constraint_state.ndim == 2 else constraint_state
         current_position = current_position[..., :3]

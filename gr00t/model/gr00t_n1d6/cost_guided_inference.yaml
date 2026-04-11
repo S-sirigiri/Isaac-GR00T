@@ -15,7 +15,7 @@ sigma_schedule:
 
 beta_schedule:
   kind: constant
-  guidance_strength: 0.0
+  guidance_strength: 1.0
 
 linear_combo: {}
 
@@ -30,7 +30,7 @@ objective:
   weights:
     cost: 0.0
     equality: 0.0
-    inequality: 1.0
+    inequality: 1000000000.0
   placeholder_terms:
     position_smoothness_weight: 1.0
     rotation_smoothness_weight: 0.1
@@ -111,12 +111,24 @@ embodiments:
     constraint_trajectory:
       kind: libero_osc_delta_rollout
       source: runtime_true_eef_position
+      # Number of leading action-horizon steps that are actually executed on
+      # the real robot before the policy re-plans. Anything past this index
+      # is thrown away by the rollout wrapper, so including it in the proxy
+      # would model a trajectory the robot never travels.
+      executed_steps: 8
       controller:
         position:
           input_min: [-1.0, -1.0, -1.0]
           input_max: [1.0, 1.0, 1.0]
           output_min: [-0.05, -0.05, -0.05]
           output_max: [0.05, 0.05, 0.05]
+          # Per-axis first-order tracking gain calibrated against offline
+          # robosuite OSC_POSE rollouts (kp=150, critically damped, 50 ms
+          # env step). OSC resets its goal from the current EE pose every
+          # env step, so p_{k+1} = p_k + g * delta_k is the exact first
+          # order recurrence — a single gain per axis is structurally
+          # correct, not an empirical fudge.
+          tracking_gain: [0.166, 0.257, 0.233]
         rotation:
           input_min: [-1.0, -1.0, -1.0]
           input_max: [1.0, 1.0, 1.0]
