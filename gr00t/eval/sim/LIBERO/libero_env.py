@@ -184,12 +184,20 @@ class LiberoEnv(gym.Env):
 
 
 def register_libero_envs():
+    # Regenerate the L-obstacle MJCF + BDDL from the single-source-of-truth
+    # config (gr00t/configs/l_obstacle/config.yaml) so the scene geometry,
+    # placement, and z-rotation are always in sync with the constraint
+    # code that reads the same file.
+    from gr00t.configs.l_obstacle.config import bootstrap_assets as _bootstrap_l_obstacle
+    _bootstrap_l_obstacle()
+
     benchmark_dict = benchmark.get_benchmark_dict()
     for task_suite_name in [
         "libero_10",
         "libero_spatial",
         "libero_object",
         "libero_object_cylinder",
+        "libero_object_l_obstacle",
         "libero_goal",
         "libero_90",
     ]:
@@ -198,7 +206,7 @@ def register_libero_envs():
             task = task_suite.get_task(task_id)
             task_name = task.name
             env_task_name = task_name
-            if task_suite_name == "libero_object_cylinder":
+            if task_suite_name in ("libero_object_cylinder", "libero_object_l_obstacle"):
                 env_task_name = f"{task_suite_name}_{task_name}"
             task_description = task.language
             task_bddl_file = os.path.join(
@@ -223,6 +231,7 @@ if __name__ == "__main__":
         "libero_spatial",
         "libero_object",
         "libero_object_cylinder",
+        "libero_object_l_obstacle",
         "libero_goal",
         "libero_90",
     ]:

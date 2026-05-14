@@ -15,7 +15,8 @@ sigma_schedule:
 
 beta_schedule:
   kind: constant
-  guidance_strength: 1.0
+  #guidance_strength: 500000.0
+  guidance_strength: 5e3
 
 linear_combo: {}
 
@@ -27,10 +28,14 @@ fkc:
   center_log_weight_increment: true
 
 objective:
+  # Selects the inequality penalty for fkc / linear_combo modes.
+  # Options: cylinder_ellipse | cylinder_squared_hinge | cylinder_abs | l_obstacle_box
+  constraint_task: cylinder_ellipse
   weights:
     cost: 0.0
     equality: 0.0
-    inequality: 1000000000.0
+    #inequality: 1000000000.0
+    inequality: 1e6
   placeholder_terms:
     position_smoothness_weight: 1.0
     rotation_smoothness_weight: 0.1

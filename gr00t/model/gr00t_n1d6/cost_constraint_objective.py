@@ -5,6 +5,8 @@ from typing import Any, Optional
 import torch
 import torch.nn.functional as F
 
+from .cost_constraint_l_obstacle import l_obstacle_avoidance_penalty
+
 
 class CostConstraintObjective:
     """Config-driven augmented objective for cost-guided GR00T inference."""
@@ -25,6 +27,9 @@ class CostConstraintObjective:
         self.equality_weight = float(self.weights.get("equality", 1.0))
         self.inequality_weight = float(self.weights.get("inequality", 1.0))
         self.softplus_beta = float(self.placeholder_terms.get("softplus_beta", 10.0))
+        # YAML-driven task selector — picks which inequality penalty applies.
+        # Default keeps the production cylinder workflow untouched.
+        self.constraint_task = str(self.objective_config.get("constraint_task", "cylinder_ellipse"))
 
     def validate_embodiment_ids(self, embodiment_id: torch.Tensor | int | list[int] | tuple[int, ...]) -> None:
         embodiment_ids = self._normalize_embodiment_ids(embodiment_id, batch_size=None)
@@ -449,12 +454,12 @@ class CostConstraintObjective:
         cylinder_center_xy = self._as_like([-0.01145, 0.02955], position)
 
         cylinder_radius = 0.02
-        epsilon = 0.00
+        epsilon = 0.01
         effective_radius = cylinder_radius + epsilon
 
         delta_xy = position[..., :2] - cylinder_center_xy
         squared_distance = delta_xy.square().sum(dim=-1)
-        print(effective_radius**2 - squared_distance)
+        #print(effective_radius**2 - squared_distance)
 
         violation = torch.clamp(effective_radius**2 - squared_distance, min=0.0)
         return violation.sum()
@@ -464,11 +469,16 @@ class CostConstraintObjective:
         ellipse_center_xy = self._as_like([-0.01145, 0.02955], position)
 
         # Hard-coded ellipse parameters. Axis lengths are semi-axes in meters.
-        long_axis = self._as_like(0.15, position)
+        long_axis = self._as_like(0.16, position)
         short_axis = self._as_like(0.04, position)
-        rotation_deg = self._as_like(90.0, position)
+        rotation_deg = self._as_like(80.0, position)
+        epsilon = 0.01
 
-        theta = torch.deg2rad(rotation_deg)
+
+        effective_long = long_axis + epsilon
+        effective_short = short_axis + epsilon
+
+        theta = torch.deg2rad(self._as_like(rotation_deg, position))
         cos_theta = torch.cos(theta)
         sin_theta = torch.sin(theta)
 
@@ -476,12 +486,10 @@ class CostConstraintObjective:
         x_rot = cos_theta * delta_xy[..., 0] + sin_theta * delta_xy[..., 1]
         y_rot = -sin_theta * delta_xy[..., 0] + cos_theta * delta_xy[..., 1]
 
-        normalized_radius = torch.sqrt(
-            (x_rot / long_axis).square() + (y_rot / short_axis).square() + 1.0e-12
-        )
-        radial_clearance = (normalized_radius - 1.0) * torch.minimum(long_axis, short_axis)
-        violation = F.softplus(-self.softplus_beta * radial_clearance) / self.softplus_beta
-        return violation.square().sum()
+        normalized_sq = (x_rot / effective_long).square() + (y_rot / effective_short).square()
+
+        violation = torch.clamp(1.0 - normalized_sq, min=0.0)
+        return violation.sum()
 
 
     """def _cylinder_penalty_hard(self, position: torch.Tensor) -> torch.Tensor:
@@ -550,6 +558,10 @@ class CostConstraintObjective:
         violation = F.softplus(self.softplus_beta * x_position) / self.softplus_beta
         return violation.square().sum()
 
+    def _l_obstacle_penalty(self, position: torch.Tensor) -> torch.Tensor:
+        as_like = lambda value: self._as_like(value, position)
+        return l_obstacle_avoidance_penalty(position, as_like)
+
     def _nonnegative_y_penalty_(self, position: torch.Tensor) -> torch.Tensor:
         y_position = position[..., 1]
         violation = F.softplus(self.softplus_beta * (-0.5 - y_position)) / self.softplus_beta
@@ -578,12 +590,19 @@ class CostConstraintObjective:
         if position is None or position.shape[-1] < 2:
             return actions.new_zeros(())
 
-
+        # YAML-driven dispatch (see cost_guided_inference.yaml::objective.constraint_task).
+        if self.constraint_task == "l_obstacle_box":
+            return self._l_obstacle_penalty(position)
+        if self.constraint_task == "cylinder_squared_hinge":
+            return self._cylinder_avoidance_penalty_squared_hinge(position)
+        if self.constraint_task == "cylinder_abs":
+            return self._cylinder_avoidance_penalty(position)
+        # Default "cylinder_ellipse" — current production behavior.
         #return self._cylinder_avoidance_penalty(position)
-        return self._cylinder_avoidance_penalty_squared_hinge(position)
-        #return self._ellipse_avoidance_penalty(position)
+        #return self._cylinder_avoidance_penalty_squared_hinge(position)
+        return self._ellipse_avoidance_penalty(position)
         #return self._xy_box_penalty(position)
-        #return self._nonnegative_x_penalty(position) + self._nonnegative_y_penalty(position) + self._nonnegative_x_penalty_(position) + self._nonnegative_y_penalty_(position) 
+        #return self._nonnegative_x_penalty(position) + self._nonnegative_y_penalty(position) + self._nonnegative_x_penalty_(position) + self._nonnegative_y_penalty_(position)
 
     def cost(
         self,

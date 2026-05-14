@@ -1,0 +1,41 @@
+# Single source of truth for the L-shaped obstacle used in
+# libero_object_l_obstacle/pick_up_the_butter_and_place_it_in_the_basket.
+#
+# This file is read by:
+#   - gr00t/configs/l_obstacle/config.py           (regenerates MJCF + BDDL on each LIBERO env registration)
+#   - gr00t/model/gr00t_n1d6/cost_constraint_l_obstacle.py  (constraint / penalty geometry)
+#
+# Edits here propagate to both the simulation scene and the constraint code.
+
+# Corner of the L in world frame xy (metres). The L's two arms extend from
+# this corner along the local +x and +y axes (before z-rotation).
+position_xy: [-0.01145, 0.02955]
+
+# Geometry of each arm (metres). Both arms share these dimensions.
+arm_length: 0.10
+arm_thickness: 0.02
+
+# Full z extent of the L (metres). The MJCF uses half this value for size_z.
+height: 0.40
+
+# Rotation about the world z axis (degrees), applied at the L corner.
+z_rotation_deg: 210.0
+
+# Visual material for the L obstacle. RGBA in [0, 1]; the 4th value is the
+# alpha / opacity (0 = invisible, 1 = fully opaque).
+material_rgba: [0.15, 0.55, 0.85, 0.25]
+
+# Constraint-only parameters. Robot/butter AABB sizes and offsets (metres,
+# world frame, xy plane only). The constraint module reads these to build
+# tight boxes around the end-effector, each gripper finger, and the held
+# butter; together with the L arms, they feed the squared-hinge penalty.
+constraint:
+  epsilon: 0.02
+  ee_halfsize_xy:           [0.040, 0.040]
+  ee_offset_xy:             [0.0, 0.0]
+  left_gripper_halfsize_xy: [0.012, 0.025]
+  left_gripper_offset_xy:   [-0.035, 0.0]
+  right_gripper_halfsize_xy: [0.012, 0.025]
+  right_gripper_offset_xy:   [0.035, 0.0]
+  butter_halfsize_xy:       [0.00871, 0.01977]
+  butter_offset_xy:         [0.0, 0.0]
