@@ -35,7 +35,7 @@ objective:
     cost: 0.0
     equality: 0.0
     #inequality: 1000000000.0
-    inequality: 1e6
+    inequality: 1e3
   placeholder_terms:
     position_smoothness_weight: 1.0
     rotation_smoothness_weight: 0.1

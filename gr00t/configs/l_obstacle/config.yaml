@@ -12,11 +12,11 @@
 position_xy: [-0.01145, 0.02955]
 
 # Geometry of each arm (metres). Both arms share these dimensions.
-arm_length: 0.10
+arm_length: 0.07
 arm_thickness: 0.02
 
 # Full z extent of the L (metres). The MJCF uses half this value for size_z.
-height: 0.40
+height: 0.80
 
 # Rotation about the world z axis (degrees), applied at the L corner.
 z_rotation_deg: 210.0
